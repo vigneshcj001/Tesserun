@@ -1,0 +1,10 @@
+.tools/
+target/
+.tesserun/
+.tesserun-rust/
+.env
+.env.*
+*.local
+*.log
+.DS_Store
+Thumbs.db

@@ -1,0 +1,7 @@
+{
+  "folders": [{ "name": "Tesserun", "path": "." }],
+  "settings": {
+    "files.exclude": { "**/.tools": true, "**/target": true },
+    "search.exclude": { "**/.tesserun": true, "**/.tesserun-rust": true }
+  }
+}
