@@ -1,0 +1,3 @@
+[target.x86_64-pc-windows-gnu]
+linker = "ld.lld.exe"
+rustflags = ["-C", "linker-flavor=ld", "-C", "link-self-contained=yes", "-C", "dlltool=llvm-dlltool.exe"]
