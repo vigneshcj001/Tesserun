@@ -7,6 +7,38 @@ pub struct Message {
     pub content: String,
 }
 
+/// Request limits enforced by the provider adapter.
+pub const MAX_MESSAGES: usize = 200;
+pub const MAX_CONVERSATION_BYTES: usize = 300_000;
+
+/// The most recent messages that fit within the given limits, beginning with a
+/// user turn, so a long session-only chat keeps working instead of exceeding
+/// provider request limits forever.
+pub fn recent_conversation(
+    messages: &[Message],
+    max_messages: usize,
+    max_bytes: usize,
+) -> Vec<Message> {
+    let mut start = messages.len();
+    let mut bytes = 0;
+    while start > 0 && messages.len() - start < max_messages {
+        let next = bytes + messages[start - 1].content.len();
+        if next > max_bytes {
+            break;
+        }
+        bytes = next;
+        start -= 1;
+    }
+    while start < messages.len() && messages[start].role != "user" {
+        start += 1;
+    }
+    if start == messages.len() {
+        // Nothing fits; send the latest turn so the provider reports why.
+        return messages.last().cloned().into_iter().collect();
+    }
+    messages[start..].to_vec()
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 pub struct SourceFile {
     pub path: String,
@@ -73,5 +105,29 @@ mod tests {
             ])
             .is_err()
         );
+    }
+    fn message(role: &str, content: &str) -> Message {
+        Message {
+            role: role.into(),
+            content: content.into(),
+        }
+    }
+    #[test]
+    fn recent_conversation_keeps_latest_turns_and_starts_with_user() {
+        let history = [
+            message("user", "aaaa"),
+            message("assistant", "bbbb"),
+            message("user", "cccc"),
+            message("assistant", "dddd"),
+            message("user", "eeee"),
+        ];
+        assert_eq!(recent_conversation(&history, 200, 1000).len(), 5);
+        // Four messages fit, but the window must not begin with an assistant turn.
+        let window = recent_conversation(&history, 4, 1000);
+        assert_eq!(window.len(), 3);
+        assert_eq!(window[0].content, "cccc");
+        let window = recent_conversation(&history, 200, 8);
+        assert_eq!(window.len(), 1);
+        assert_eq!(window[0].content, "eeee");
     }
 }

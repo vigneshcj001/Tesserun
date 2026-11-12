@@ -1,6 +1,6 @@
 mod config;
 mod response;
-use crate::domain::Message;
+use crate::domain::{MAX_CONVERSATION_BYTES, MAX_MESSAGES, Message};
 use anyhow::{Result, bail, ensure};
 pub use config::{Connection, default_endpoint};
 use serde_json::json;
@@ -23,7 +23,7 @@ impl Providers {
             "Choose a model ID"
         );
         ensure!(
-            !messages.is_empty() && messages.len() <= 200,
+            !messages.is_empty() && messages.len() <= MAX_MESSAGES,
             "Conversation requires 1–200 messages"
         );
         ensure!(
@@ -33,7 +33,7 @@ impl Providers {
             "Invalid message role"
         );
         ensure!(
-            messages.iter().map(|m| m.content.len()).sum::<usize>() <= 300_000,
+            messages.iter().map(|m| m.content.len()).sum::<usize>() <= MAX_CONVERSATION_BYTES,
             "Conversation too large"
         );
         let key_name = match c.provider.as_str() {
@@ -82,7 +82,8 @@ impl Providers {
                 )
             }
             "ollama" => {
-                let endpoint = reqwest::Url::parse(&c.endpoint)?;
+                let endpoint = reqwest::Url::parse(c.endpoint.trim())
+                    .map_err(|_| anyhow::anyhow!("Enter a valid Ollama origin URL"))?;
                 ensure!(
                     ["http", "https"].contains(&endpoint.scheme())
                         && [Some("localhost"), Some("127.0.0.1"), Some("[::1]")]
@@ -95,7 +96,8 @@ impl Providers {
                     "Ollama must use a loopback origin"
                 );
                 (
-                    format!("{}/api/chat", c.endpoint.trim_end_matches('/')),
+                    // Build from the validated URL, not the raw user text.
+                    endpoint.join("api/chat")?.to_string(),
                     json!({"model":c.model,"messages":messages,"stream":false}),
                 )
             }
