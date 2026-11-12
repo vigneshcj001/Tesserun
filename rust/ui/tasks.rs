@@ -46,11 +46,23 @@ impl<T: Send + 'static> TaskRunner<T> {
         self.active.is_some()
     }
     pub(super) fn poll(&mut self) -> Option<Result<T, String>> {
+        // Sample completion before draining: a task sends its result before it
+        // finishes, so a finished task with no queued result panicked.
+        let finished = self
+            .active
+            .as_ref()
+            .is_some_and(tokio::task::JoinHandle::is_finished);
         while let Ok((generation, result)) = self.receiver.try_recv() {
             if generation == self.generation && self.active.is_some() {
                 self.active = None;
                 return Some(result);
             }
+        }
+        if finished {
+            self.active = None;
+            return Some(Err(
+                "The operation stopped unexpectedly. Please retry.".into()
+            ));
         }
         None
     }
@@ -80,6 +92,21 @@ mod tests {
         assert!(runner.is_busy());
         runner.sender.send((runner.generation, Ok(3))).unwrap();
         assert_eq!(runner.poll().unwrap().unwrap(), 3);
+        assert!(!runner.is_busy());
+    }
+    #[test]
+    fn panicked_task_reports_failure_instead_of_staying_busy() {
+        let mut runner = TaskRunner::<u8>::new().unwrap();
+        runner.spawn(egui::Context::default(), async {
+            if std::hint::black_box(true) {
+                panic!("fixture panic");
+            }
+            Ok(1)
+        });
+        while !runner.active.as_ref().unwrap().is_finished() {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(runner.poll().unwrap().is_err());
         assert!(!runner.is_busy());
     }
 }

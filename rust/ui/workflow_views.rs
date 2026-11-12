@@ -112,6 +112,11 @@ impl Workspace {
             });
             if self.dirty {ui.label(RichText::new("Save changes before packaging or publishing.").color(AMBER));}
         });
+        if export || deploy {
+            // Each release action needs a fresh, explicit confirmation.
+            self.export_confirmed = false;
+            self.deploy_confirmed = false;
+        }
         if export {
             let snapshot = self.selected.as_ref().expect("selected project").clone();
             self.launch(ctx.clone(), async move {

@@ -143,6 +143,7 @@ impl eframe::App for Workspace {
                             }
                         }
                     }
+                    report.agents.sort_by_key(|agent| agent.role);
                     self.report = Some(report);
                     self.status =
                         "Static source checks completed. Runtime tests were not executed.".into();
@@ -166,11 +167,9 @@ impl eframe::App for Workspace {
                 }
                 Event::Saved(project) => {
                     self.dirty = false;
-                    if let Some(existing) =
-                        self.projects.iter_mut().find(|item| item.id == project.id)
-                    {
-                        *existing = project;
-                    }
+                    // Newest revision first, matching the order storage returns.
+                    self.projects.retain(|item| item.id != project.id);
+                    self.projects.insert(0, project);
                     self.status = "Revision saved".into();
                 }
                 Event::Failed(error) => self.status = error,

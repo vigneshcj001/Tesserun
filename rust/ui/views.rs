@@ -48,6 +48,9 @@ impl Workspace {
                         self.report = None;
                         self.deployment = None;
                         self.export_path = None;
+                        self.export_confirmed = false;
+                        self.deploy_confirmed = false;
+                        self.file = 0;
                         self.tab = 0;
                     }
                 }
@@ -278,7 +281,7 @@ impl Workspace {
             ui.add(egui::TextEdit::multiline(&mut self.draft).desired_rows(3).desired_width(f32::INFINITY).hint_text("Ask a question…"));
             if ui.add_enabled(!self.tasks.is_busy() && !self.draft.trim().is_empty(), primary("Send message")).clicked() {
                 self.messages.push(Message { role:"user".into(),content:std::mem::take(&mut self.draft) });
-                let messages=self.messages.clone(); let service=self.service.clone(); let connection=self.connection.clone();
+                let messages=crate::domain::recent_conversation(&self.messages,crate::domain::MAX_MESSAGES,crate::domain::MAX_CONVERSATION_BYTES); let service=self.service.clone(); let connection=self.connection.clone();
                 self.launch(ctx.clone(),async move { Ok(Event::Reply(service.providers.complete(&connection,&messages).await?)) });
             }
         });

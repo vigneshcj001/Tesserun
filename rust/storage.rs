@@ -63,17 +63,24 @@ impl Store {
         revisions.sort_by(|a, b| b.1.0.cmp(&a.1.0));
         let mut projects = Vec::with_capacity(revisions.len());
         for (id, ((_, name), size)) in revisions {
-            ensure!(size <= 32 * 1024 * 1024, "Saved revision exceeds 32 MB");
-            let bytes = tokio::fs::read(self.root.join(name)).await?;
-            let project: Project = serde_json::from_slice(&bytes)?;
-            ensure!(
-                project.id == id,
-                "Saved revision ID does not match its filename"
-            );
-            validate_files(&project.files)?;
-            projects.push(project);
+            // One damaged revision must not hide every other saved project.
+            match self.load(id, &name, size).await {
+                Ok(project) => projects.push(project),
+                Err(error) => eprintln!("Skipping unreadable revision {name}: {error}"),
+            }
         }
         Ok(projects)
+    }
+    async fn load(&self, id: uuid::Uuid, name: &str, size: u64) -> Result<Project> {
+        ensure!(size <= 32 * 1024 * 1024, "Saved revision exceeds 32 MB");
+        let bytes = tokio::fs::read(self.root.join(name)).await?;
+        let project: Project = serde_json::from_slice(&bytes)?;
+        ensure!(
+            project.id == id,
+            "Saved revision ID does not match its filename"
+        );
+        validate_files(&project.files)?;
+        Ok(project)
     }
 }
 

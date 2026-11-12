@@ -164,3 +164,29 @@ async fn rejects_remote_ollama_without_making_an_external_request() {
             .is_err()
     );
 }
+
+#[tokio::test]
+async fn a_damaged_revision_does_not_hide_other_projects() {
+    let root = std::env::temp_dir().join(format!("tesserun-damaged-test-{}", uuid::Uuid::new_v4()));
+    let store = tesserun::storage::Store::new(root.clone());
+    let healthy = Project {
+        id: uuid::Uuid::new_v4(),
+        prompt: "Healthy".into(),
+        files: vec![SourceFile {
+            path: "index.html".into(),
+            content: "<h1>Healthy</h1>".into(),
+        }],
+        verification: "unverified".into(),
+    };
+    store.save(&healthy).await.unwrap();
+    let damaged = root.join(format!(
+        "{}-{}.json",
+        uuid::Uuid::new_v4(),
+        uuid::Uuid::new_v4()
+    ));
+    tokio::fs::write(&damaged, "not valid JSON").await.unwrap();
+    let loaded = store.list().await.unwrap();
+    assert_eq!(loaded.len(), 1);
+    assert_eq!(loaded[0].id, healthy.id);
+    tokio::fs::remove_dir_all(root).await.unwrap();
+}
