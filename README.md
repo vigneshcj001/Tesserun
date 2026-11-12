@@ -13,18 +13,20 @@ Tesserun brings **development, quality checks, and deployment** into one desktop
 - **Quality checks:** deterministic source checks alongside advisory agent findings. Reports become stale when source changes.
 - **Deployment:** export a source bundle or explicitly publish static files to Vercel.
 - **Provider connections:** Ollama, OpenAI, Anthropic, Gemini, and Groq.
-- **AI chat:** a session-only conversation with your configured model.
+- **AI chat:** a session-only conversation with your configured model. Long chats send the most recent messages that fit provider limits (200 messages / 300 KB).
 - **Responsive desktop work:** cancellable background operations and an optional agent activity panel.
 - **Optional local API:** authenticated endpoints for generation, chat, and project listing.
 
 The model-driven roles run sequentially within one workflow. QA performs deterministic checks; the release role handles export and publishing. They are not five independently running model agents.
+
+See [docs/AI_SYSTEM_DESIGN.md](docs/AI_SYSTEM_DESIGN.md) for the request pipeline, safety controls and limits, and a review against common AI system design practices.
 
 ## Quick start on the existing Windows workspace
 
 From PowerShell:
 
 ```powershell
-cd D:\APp\Tesserun
+cd D:\Tesserun-Workspace\Tesserun
 .\scripts\rust.cmd run
 ```
 
@@ -56,7 +58,7 @@ For a GNU build, `.cargo/config.toml` requires `ld.lld.exe` and `llvm-dlltool.ex
 4. Review the generated source, save any edits, and run **Quality checks**.
 5. Open **Deployments** to export source or publish to Vercel.
 
-A development workflow makes three model requests. Provider usage may incur charges. If the advisory reviewer fails, generated source is retained and the review is marked as needing attention.
+A development workflow makes three model requests. Provider usage may incur charges. If the advisory reviewer fails, generated source is retained and the review is marked as needing attention. The plan guides generation but is not saved; each build saves one revision under your original brief. Model replies that wrap the JSON in a code block or short prose are accepted.
 
 Keys entered in the UI stay in process memory. Provider environment variables are also supported: `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, and `GROQ_API_KEY`. Ollama endpoints are restricted to loopback addresses. `.env` files are not loaded automatically.
 
@@ -128,8 +130,9 @@ Release builds enable thin LTO and strip symbols. Installer packaging, signing, 
 | `rust/main.rs` | Desktop entry point |
 | `rust/bin/server.rs` | Headless API entry point |
 | `tests/rust_workflow.rs` | Integration tests using local fixtures |
+| `docs/AI_SYSTEM_DESIGN.md` | AI pipeline, controls, and design review |
 
-The native interface calls shared Rust services directly. Provider I/O runs on Tokio tasks. Cancellation prevents stale results from updating the workspace, and history loading reads only the latest source revision for each project.
+The native interface calls shared Rust services directly. Provider I/O runs on Tokio tasks. Cancellation prevents stale results from updating the workspace, and a task that crashes reports an error instead of leaving the workspace busy. History loading reads only the latest source revision for each project, and skips a damaged revision instead of hiding every project.
 
 ## Optional local HTTP API
 
@@ -160,6 +163,8 @@ All routes except health require `Authorization: Bearer <token>`. A connection c
 
 - Revisions are stored in `.tesserun-rust/projects`; `TESSERUN_RUST_DATA_ROOT` overrides the data root.
 - Saved source is unencrypted. Provider keys are not saved with projects.
+- Each export or publish requires a fresh confirmation; the checkbox clears after every release action.
+- There are no automatic retries, JSON repair requests, usage/cost tracking, or quality evaluations yet. See the recommendations in `docs/AI_SYSTEM_DESIGN.md`.
 - Older `.tesserun` data is not imported by this version.
 - Generated files are validated for allowed names, duplicates, file count, and total size. Runtime and security verification are not implemented.
 - Streaming, persistent chat history, model discovery, attachments, encrypted credential storage, OAuth, preview rendering, sandbox execution, automatic repair loops, and revision-selection UI remain unimplemented.
