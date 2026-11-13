@@ -2,7 +2,7 @@
 
 This document describes how Tesserun uses language models, and reviews the design against common AI system design practices. It reflects the code in `rust/` as of version 0.3.0.
 
-**Summary:** Tesserun meets the core practices for safety and control. It validates model output against a strict schema, never executes generated code, restricts network targets, and requires explicit human confirmation before anything is published. Its main gaps are in evaluation, observability, and resilience: there are no quality evaluations, no request logging or cost tracking, and no retries when a provider fails or returns malformed output.
+**Summary:** Tesserun meets the core practices for safety and control. It validates model output against a strict schema, never executes generated code, restricts network targets, and requires explicit human confirmation before anything is published. It also retries busy providers, asks once for a corrected reply when output is unusable, keeps prompts versioned, and saves build metadata with each project. The remaining gaps are quality evaluation, token and cost tracking, runtime verification, and an independent reviewer model.
 
 ## 1. Architecture
 
@@ -23,21 +23,26 @@ flowchart LR
 | Component | File | Role |
 | --- | --- | --- |
 | Provider adapter | `rust/providers/` | Builds one request per provider, enforces limits, decodes and checks completion status |
-| Generation service | `rust/service.rs` | Prompts for a JSON file bundle, parses it, validates it, saves a revision |
+| Prompts | `rust/prompts.rs` | Versioned prompts for each role; user text is wrapped in delimiters |
+| Generation service | `rust/service.rs` | Requests a JSON file bundle, repairs it once if unusable, validates it, saves a revision with build metadata |
 | Workflow | `rust/workflow.rs` | Runs Planner → Developer → deterministic checks → Reviewer |
-| Validation | `rust/domain.rs` | File allowlist, size and count limits, chat window limits |
+| Validation | `rust/domain.rs` | File allowlist, size and count limits, chat window limits, build metadata type |
 | Storage | `rust/storage.rs` | Immutable revision files; loads the newest revision per project |
 | Release | `rust/release.rs` | Opt-in, confirmed Vercel deployment |
 | UI task runner | `rust/ui/tasks.rs` | One cancellable operation at a time; stale results are discarded |
 
 ## 2. Request pipeline
 
-One build makes exactly three model requests, in sequence:
+A build makes three model requests in sequence, plus at most one repair request:
 
 1. **Planner.** Asks for an implementation plan and acceptance criteria (up to 1,500 characters requested; up to 4,000 kept).
-2. **Developer.** Asks for `{"files":[{"path","content"}]}` JSON. The plan is passed as context but is not saved; only the user's prompt is stored. The parser accepts bare JSON, fenced JSON, or JSON surrounded by prose.
-3. **Deterministic checks.** No model call. Checks file rules, a non-empty `index.html`, external URLs, and markers such as `eval(` and `document.cookie`.
-4. **Reviewer.** Sends bounded source excerpts (18,000 bytes per file) for advisory findings. If this call fails, the generated project is kept and the reviewer is marked "Needs attention".
+2. **Developer.** Asks for `{"files":[{"path","content"}]}` JSON, using the provider's native JSON mode where available (OpenAI, Gemini, Ollama). The user's brief and the plan are wrapped in `<brief>` and `<plan>` tags that the text cannot close early. The parser accepts bare JSON, fenced JSON, or JSON surrounded by prose.
+3. **Repair (only if needed).** If the reply can't be parsed or fails validation, Tesserun sends the reply and the reason back once and asks for a corrected project. If that also fails, nothing is saved.
+4. **Save.** The project is saved with its original brief and build metadata: provider, model, prompt version, plan, timestamp, duration, and whether a repair was needed. Credentials are never saved.
+5. **Deterministic checks.** No model call. Checks file rules, a non-empty `index.html`, external URLs, and markers such as `eval(` and `document.cookie`.
+6. **Reviewer.** Sends bounded source excerpts (18,000 bytes per file) for advisory findings. If this call fails, the generated project is kept and the reviewer is marked "Needs attention".
+
+Every model request is retried up to twice when the provider responds with HTTP 429 or a 5xx error, or the connection fails. Retries wait 0.5 s and then 1 s, or the provider's `Retry-After` value (capped at 10 s).
 
 Chat uses the same provider adapter. It sends the most recent messages that fit within 200 messages and 300,000 bytes.
 
@@ -54,7 +59,9 @@ Chat uses the same provider adapter. It sends the most recent messages that fit 
 | Redirects | Disabled |
 | Ollama endpoint | Loopback only (`localhost`, `127.0.0.1`, `[::1]`) |
 | Incomplete output | Rejected (for example, output that hit the token limit) |
-| API access | Bearer token of at least 32 characters; requests with an `Origin` header are rejected; 512 KB body limit |
+| Retries | Up to 2, for HTTP 429, 5xx, and connection failures |
+| Repair requests | At most 1 per build |
+| API access | Bearer token of at least 32 characters; requests with an `Origin` header are rejected; 512 KB body limit; at most 2 concurrent model requests (others get HTTP 429) |
 | Publishing | Requires `TESSERUN_ENABLE_VERCEL_DEPLOYMENTS=true`, a token, and a fresh confirmation for each release |
 
 ## 4. Design review
@@ -64,35 +71,34 @@ Status key: **Meets** = practice is implemented; **Partial** = partly implemente
 | Area | Status | Assessment |
 | --- | --- | --- |
 | Clear task decomposition | Meets | Separate Planner, Developer, and Reviewer requests with defined inputs and outputs. |
-| Structured output and validation | Meets | Strict schema, path allowlist, duplicate and size checks before saving. |
+| Structured output and validation | Meets | Native JSON mode where available, a strict schema, path allowlist, and duplicate and size checks before saving. |
 | Untrusted output handling | Meets | Generated code is never executed; it is only stored, checked lexically, exported, or published after confirmation. |
-| Prompt injection resistance | Partial | The reviewer prompt treats source as untrusted, and output is schema-constrained. The user prompt is inserted directly into instructions without delimiters. |
+| Prompt injection resistance | Meets | User text is wrapped in delimiters it can't close, and the prompt states that the brief can't change the output rules. Output is schema-validated regardless. This reduces, but can't eliminate, injection risk. |
 | Human in the loop | Meets | Export and publishing each require explicit, single-use confirmation. Nothing deploys automatically. |
 | Honest capability reporting | Meets | Reports state that runtime behavior is unverified; `runtime_verified` and `deployment_ready` are always false. |
 | Network and credential safety | Meets | Keys stay in memory or environment variables and are never saved with projects. Ollama is loopback-only. Redirects are disabled. |
-| Bounded resources | Meets | Limits on prompt, conversation, response, output, and request time. |
-| Failure handling | Partial | Incomplete outputs are rejected, reviewer failure keeps the project, and crashed tasks report an error. There are no retries, backoff, or repair requests for invalid JSON. |
-| Provider abstraction | Partial | One entry point for all providers, but provider logic is spread across string `match` blocks in two files. Adding a provider requires editing both. |
-| Prompt management | Gap | Prompts are inline strings with no versioning, so saved projects don't record which prompt produced them. |
-| Evaluation | Gap | Tests use fixed fixture responses. There is no benchmark set of briefs and no measurement of generation quality or reviewer accuracy. |
-| Runtime verification | Gap | No sandbox runs generated apps or behavior tests. |
-| Observability | Gap | No structured logs, latency, or token usage records. Provider error bodies are deliberately hidden, so failures show only an HTTP status. |
-| Cost control | Gap | No token or cost estimate before a build, no usage totals, and no rate limits on the local API. |
+| Bounded resources | Meets | Limits on prompt, conversation, response, output, request time, retries, and concurrent API requests. |
+| Failure handling | Meets | Retries with backoff for busy or failing providers, one repair request for unusable output, rejection of incomplete output, and reviewer failure keeps the project. |
+| Prompt management | Meets | Prompts live in `rust/prompts.rs` with a version that is saved with each build. |
+| Reproducibility | Meets | Revisions are immutable, and each build records its brief, provider, model, prompt version, and plan. Model sampling is not deterministic, so outputs still vary. |
+| Provider abstraction | Partial | One entry point for all providers, but provider logic is spread across string `match` blocks. Adding a provider requires editing several of them. |
+| Observability | Partial | Build duration and repair status are saved. There are no structured logs or token usage records, and provider error bodies are deliberately hidden, so failures show only an HTTP status. |
+| Cost control | Partial | The local API allows at most 2 concurrent model requests, and retries and repairs are capped. There is no token or cost estimate before a build and no usage totals. |
 | Reviewer independence | Partial | The reviewer is a separate request but uses the same provider and model as the developer, so it shares the developer's blind spots. |
 | Data privacy | Partial | Prompts and source go to the selected provider (or stay local with Ollama). Saved projects are stored unencrypted on disk. |
-| Reproducibility | Partial | Revisions are immutable and the original prompt is saved. The model ID, provider, and plan used for a build are not saved. |
+| Evaluation | Gap | Tests use fixed fixture responses. There is no benchmark set of briefs and no measurement of generation quality or reviewer accuracy. |
+| Runtime verification | Gap | No sandbox runs generated apps or behavior tests. |
 
 ## 5. Recommendations
 
-In priority order:
+Done in version 0.3.0: build metadata, one repair request, retries with backoff, native JSON mode, delimited user input, versioned prompts, and an API concurrency limit.
 
-1. **Record build metadata.** Save provider, model ID, prompt version, plan text, token usage, and duration with each revision. This enables debugging, reproducibility, and cost tracking at low effort.
-2. **Add one repair attempt.** When the Developer's JSON fails to parse or validate, send the validation error back once and ask for corrected JSON.
-3. **Retry transient failures.** Retry HTTP 429 and 5xx responses with backoff, honoring `Retry-After`.
-4. **Use native structured output.** Request JSON mode or a response schema where the provider supports it (OpenAI, Gemini, Ollama `format`), instead of relying on prompt instructions alone.
-5. **Delimit user input in prompts.** Wrap the brief in clearly marked tags and tell the model to treat it as a requirement, not as instructions that change the output format.
-6. **Build an evaluation set.** Keep 10–20 reference briefs with acceptance checks, and run them against each prompt or model change.
-7. **Let the reviewer use a different model.** An optional separate reviewer connection gives a more independent second opinion.
-8. **Move prompts into versioned constants**, one module per role, so changes are reviewable and recorded with each build.
-9. **Add a sandboxed preview** (for example, a locked-down WebView with network disabled) as the first step toward runtime verification.
-10. **Show estimated cost** before a build, and add a rate limit to the local API.
+Remaining, in priority order:
+
+1. **Record token usage.** Read each provider's usage fields and save input and output tokens with the build metadata.
+2. **Show estimated cost** before a build, using recorded token counts and per-model prices.
+3. **Build an evaluation set.** Keep 10–20 reference briefs with acceptance checks, and run them against each prompt version or model change.
+4. **Let the reviewer use a different model.** An optional separate reviewer connection gives a more independent second opinion.
+5. **Add a sandboxed preview** (for example, a locked-down WebView with network disabled) as the first step toward runtime verification.
+6. **Move provider logic behind one type per provider**, so adding a provider touches one file.
+7. **Offer encrypted project storage** for users who keep sensitive briefs.

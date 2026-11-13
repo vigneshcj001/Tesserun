@@ -4,6 +4,7 @@ use crate::domain::{MAX_CONVERSATION_BYTES, MAX_MESSAGES, Message};
 use anyhow::{Result, bail, ensure};
 pub use config::{Connection, default_endpoint};
 use serde_json::json;
+use std::time::Duration;
 #[derive(Clone)]
 pub struct Providers {
     client: reqwest::Client,
@@ -17,7 +18,16 @@ impl Providers {
                 .build()?,
         })
     }
+    /// Requests a plain-text completion.
     pub async fn complete(&self, c: &Connection, messages: &[Message]) -> Result<String> {
+        self.request(c, messages, false).await
+    }
+    /// Requests a JSON object, using the provider's native JSON mode where it
+    /// is reliably available. Callers must still parse and validate the reply.
+    pub async fn complete_json(&self, c: &Connection, messages: &[Message]) -> Result<String> {
+        self.request(c, messages, true).await
+    }
+    async fn request(&self, c: &Connection, messages: &[Message], json: bool) -> Result<String> {
         ensure!(
             !c.model.trim().is_empty() && c.model.len() <= 200,
             "Choose a model ID"
@@ -53,7 +63,7 @@ impl Providers {
             c.provider == "ollama" || !key.is_empty(),
             "Provider API key is required"
         );
-        let (url, body) = match c.provider.as_str() {
+        let (url, mut body): (String, serde_json::Value) = match c.provider.as_str() {
             "openai" => (
                 "https://api.openai.com/v1/responses".into(),
                 json!({"model":c.model,"input":messages,"store":false,"max_output_tokens":8192}),
@@ -103,24 +113,43 @@ impl Providers {
             }
             _ => unreachable!(),
         };
-        let mut request = self.client.post(url).json(&body);
-        request = match c.provider.as_str() {
-            "anthropic" => request
-                .header("x-api-key", &key)
-                .header("anthropic-version", "2023-06-01"),
-            "gemini" => request.header("x-goog-api-key", &key),
-            "ollama" => request,
-            _ => request.bearer_auth(&key),
+        if json {
+            match c.provider.as_str() {
+                "openai" => body["text"] = json!({"format":{"type":"json_object"}}),
+                "gemini" => {
+                    body["generationConfig"] = json!({"responseMimeType":"application/json"})
+                }
+                "ollama" => body["format"] = json!("json"),
+                // Anthropic has no JSON mode, and Groq's depends on the model;
+                // both rely on the prompt plus local parsing and validation.
+                _ => {}
+            }
+        }
+        let mut attempt = 0;
+        let mut response = loop {
+            let mut request = self.client.post(url.as_str()).json(&body);
+            request = match c.provider.as_str() {
+                "anthropic" => request
+                    .header("x-api-key", &key)
+                    .header("anthropic-version", "2023-06-01"),
+                "gemini" => request.header("x-goog-api-key", &key),
+                "ollama" => request,
+                _ => request.bearer_auth(&key),
+            };
+            match request.send().await {
+                Ok(response) if response.status().is_success() => break response,
+                Ok(response) if attempt < MAX_RETRIES && retryable(response.status()) => {
+                    let wait = retry_after(&response).unwrap_or_else(|| backoff(attempt));
+                    tokio::time::sleep(wait).await;
+                }
+                Ok(response) => bail!("Provider returned HTTP {}", response.status()),
+                Err(error) if attempt < MAX_RETRIES && error.is_connect() => {
+                    tokio::time::sleep(backoff(attempt)).await;
+                }
+                Err(_) => bail!("Provider connection failed"),
+            }
+            attempt += 1;
         };
-        let mut response = request
-            .send()
-            .await
-            .map_err(|_| anyhow::anyhow!("Provider connection failed"))?;
-        ensure!(
-            response.status().is_success(),
-            "Provider returned HTTP {}",
-            response.status()
-        );
         let mut bytes = Vec::new();
         while let Some(chunk) = response.chunk().await? {
             ensure!(
@@ -131,4 +160,30 @@ impl Providers {
         }
         response::decode(&c.provider, &bytes)
     }
+}
+
+/// Retries after the first attempt for rate limits, server errors, and
+/// connection failures. Other failures are returned immediately.
+const MAX_RETRIES: u32 = 2;
+
+fn retryable(status: reqwest::StatusCode) -> bool {
+    status == reqwest::StatusCode::TOO_MANY_REQUESTS || status.is_server_error()
+}
+
+/// 500 ms, then 1 s.
+fn backoff(attempt: u32) -> Duration {
+    Duration::from_millis(500 << attempt)
+}
+
+/// Honors a numeric `Retry-After` header, capped so the UI stays responsive.
+fn retry_after(response: &reqwest::Response) -> Option<Duration> {
+    let seconds: u64 = response
+        .headers()
+        .get(reqwest::header::RETRY_AFTER)?
+        .to_str()
+        .ok()?
+        .trim()
+        .parse()
+        .ok()?;
+    Some(Duration::from_secs(seconds.min(10)))
 }

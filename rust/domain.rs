@@ -51,6 +51,34 @@ pub struct Project {
     pub prompt: String,
     pub files: Vec<SourceFile>,
     pub verification: String,
+    /// How the source was generated. Absent for projects saved by older versions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub build: Option<BuildInfo>,
+}
+
+/// Generation metadata saved with a project for debugging and reproducibility.
+/// Never contains credentials.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct BuildInfo {
+    pub provider: String,
+    pub model: String,
+    pub prompt_version: String,
+    /// Planner output passed to the developer as context, if any.
+    pub plan: String,
+    pub created_unix: u64,
+    pub duration_ms: u64,
+    /// True when the first reply was unusable and one repair request succeeded.
+    pub repaired: bool,
+}
+
+/// The longest prefix of `value` within `limit` bytes that ends on a character boundary.
+pub fn bounded_text(value: &str, limit: usize) -> &str {
+    let mut end = value.len().min(limit);
+    while !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    &value[..end]
 }
 
 pub fn validate_files(files: &[SourceFile]) -> Result<()> {

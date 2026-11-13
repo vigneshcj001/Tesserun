@@ -338,7 +338,8 @@ impl Workspace {
             let mut save=None;
             if let Some(project)=&mut self.selected {
                 card().show(ui, |ui| {
-                    ui.horizontal(|ui| { ui.strong("Source workspace"); ui.label(RichText::new(format!("{} files",project.files.len())).small().color(MUTED)); });
+                    ui.horizontal(|ui| { ui.strong("Source workspace"); ui.label(RichText::new(format!("{} files",project.files.len())).small().color(MUTED));
+                        if let Some(build)=&project.build { ui.label(RichText::new(format!("Generated with {} / {}{}",build.provider,build.model,if build.repaired {" after one repair request"} else {""})).small().color(MUTED)); } });
                     ui.horizontal_wrapped(|ui| { for (index,file) in project.files.iter().enumerate() { ui.selectable_value(&mut self.file,index,&file.path); } });
                     if let Some(file)=project.files.get_mut(self.file)
                         && ui.add_enabled(!self.tasks.is_busy(),egui::TextEdit::multiline(&mut file.content).code_editor().desired_rows(18).desired_width(f32::INFINITY)).changed() {

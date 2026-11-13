@@ -1,5 +1,6 @@
 pub mod api;
 pub mod domain;
+pub mod prompts;
 pub mod providers;
 pub mod release;
 pub mod service;

@@ -58,7 +58,7 @@ For a GNU build, `.cargo/config.toml` requires `ld.lld.exe` and `llvm-dlltool.ex
 4. Review the generated source, save any edits, and run **Quality checks**.
 5. Open **Deployments** to export source or publish to Vercel.
 
-A development workflow makes three model requests. Provider usage may incur charges. If the advisory reviewer fails, generated source is retained and the review is marked as needing attention. The plan guides generation but is not saved; each build saves one revision under your original brief. Model replies that wrap the JSON in a code block or short prose are accepted.
+A development workflow makes three model requests. Provider usage may incur charges. If the advisory reviewer fails, generated source is retained and the review is marked as needing attention. Each build saves one revision under your original brief, along with the provider, model, prompt version, and plan used. Busy or failing providers (HTTP 429, 5xx, or connection errors) are retried up to twice. If the model's reply isn't usable project JSON, Tesserun asks once for a corrected reply; if that also fails, nothing is saved.
 
 Keys entered in the UI stay in process memory. Provider environment variables are also supported: `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, and `GROQ_API_KEY`. Ollama endpoints are restricted to loopback addresses. `.env` files are not loaded automatically.
 
@@ -119,7 +119,8 @@ Release builds enable thin LTO and strip symbols. Installer packaging, signing, 
 
 | Module | Responsibility |
 | --- | --- |
-| `rust/domain.rs` | Project types, messages, and generated-file constraints |
+| `rust/domain.rs` | Project types, build metadata, messages, and generated-file constraints |
+| `rust/prompts.rs` | Versioned prompts for each agent role |
 | `rust/providers/` | Provider configuration, HTTP requests, and response decoding |
 | `rust/service.rs` | Source generation service |
 | `rust/workflow.rs` | Agent orchestration, static checks, and source export |
@@ -157,14 +158,14 @@ The server binds to `127.0.0.1:8789`. Set `TESSERUN_RUST_PORT` to change the por
 | `POST /api/builds` | Generate source from `{ prompt, connection }` |
 | `POST /api/chat` | Request a completion from `{ messages, connection }` |
 
-All routes except health require `Authorization: Bearer <token>`. A connection contains `provider`, `model`, optional `api_key`, and an optional loopback Ollama `endpoint`. Requests containing a browser Origin header are rejected. Keep this single-user API local to a trusted user; it is not a public hosting configuration.
+All routes except health require `Authorization: Bearer <token>`. At most two generation or chat requests run at once; additional requests receive HTTP 429. A connection contains `provider`, `model`, optional `api_key`, and an optional loopback Ollama `endpoint`. Requests containing a browser Origin header are rejected. Keep this single-user API local to a trusted user; it is not a public hosting configuration.
 
 ## Local data and current limitations
 
 - Revisions are stored in `.tesserun-rust/projects`; `TESSERUN_RUST_DATA_ROOT` overrides the data root.
 - Saved source is unencrypted. Provider keys are not saved with projects.
 - Each export or publish requires a fresh confirmation; the checkbox clears after every release action.
-- There are no automatic retries, JSON repair requests, usage/cost tracking, or quality evaluations yet. See the recommendations in `docs/AI_SYSTEM_DESIGN.md`.
+- Token usage, cost estimates, quality evaluations, and an independent reviewer model are not implemented yet. See the recommendations in `docs/AI_SYSTEM_DESIGN.md`.
 - Older `.tesserun` data is not imported by this version.
 - Generated files are validated for allowed names, duplicates, file count, and total size. Runtime and security verification are not implemented.
 - Streaming, persistent chat history, model discovery, attachments, encrypted credential storage, OAuth, preview rendering, sandbox execution, automatic repair loops, and revision-selection UI remain unimplemented.

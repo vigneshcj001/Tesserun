@@ -15,6 +15,17 @@ use std::sync::Arc;
 struct ApiState {
     service: Service,
     token: Arc<String>,
+    /// Bounds concurrent model requests so one client cannot queue unlimited
+    /// paid provider calls.
+    model_slots: Arc<tokio::sync::Semaphore>,
+}
+const MAX_CONCURRENT_MODEL_REQUESTS: usize = 2;
+fn busy() -> Response {
+    (
+        StatusCode::TOO_MANY_REQUESTS,
+        Json(json!({"error":{"message":"Too many model requests are running. Retry shortly."}})),
+    )
+        .into_response()
 }
 #[derive(Deserialize)]
 struct BuildInput {
@@ -64,6 +75,7 @@ pub fn router(service: Service, token: String) -> anyhow::Result<Router> {
     let state = ApiState {
         service,
         token: Arc::new(token),
+        model_slots: Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_MODEL_REQUESTS)),
     };
     let protected = Router::new()
         .route("/api/builds", get(list).post(build))
@@ -85,12 +97,18 @@ async fn list(State(state): State<ApiState>) -> Response {
     }
 }
 async fn build(State(state): State<ApiState>, Json(input): Json<BuildInput>) -> Response {
+    let Ok(_slot) = state.model_slots.try_acquire() else {
+        return busy();
+    };
     match state.service.build(input.prompt, input.connection).await {
         Ok(project) => Json(json!({"job":project})).into_response(),
         Err(e) => failure(e),
     }
 }
 async fn chat(State(state): State<ApiState>, Json(input): Json<ChatInput>) -> Response {
+    let Ok(_slot) = state.model_slots.try_acquire() else {
+        return busy();
+    };
     match state
         .service
         .providers

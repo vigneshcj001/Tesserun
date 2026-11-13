@@ -178,6 +178,7 @@ mod tests {
                 content: "<h1>Fixture</h1>".into(),
             }],
             verification: "unverified".into(),
+            build: None,
         }
     }
 

@@ -1,5 +1,6 @@
 use crate::{
-    domain::{Message, Project, SourceFile, validate_files},
+    domain::{BuildInfo, Message, Project, SourceFile, bounded_text, validate_files},
+    prompts,
     providers::{Connection, Providers},
     storage::Store,
 };
@@ -21,7 +22,8 @@ impl Service {
         self.build_with_context(prompt, "", connection).await
     }
     /// Generates and saves a project. `context` (for example an implementation
-    /// plan) guides the model but is not persisted; only `prompt` is saved.
+    /// plan) guides the model and is recorded in the build metadata; the
+    /// project's prompt is only the user's brief.
     pub async fn build_with_context(
         &self,
         prompt: String,
@@ -32,35 +34,71 @@ impl Service {
             !prompt.trim().is_empty() && prompt.len() <= 20_000,
             "Prompt requires 1–20000 characters"
         );
-        let context = if context.trim().is_empty() {
-            String::new()
-        } else {
-            format!("\n\nImplementation plan (context only):\n{context}")
+        let started = std::time::Instant::now();
+        let request = Message {
+            role: "user".into(),
+            content: prompts::developer(&prompt, context),
         };
-        let instruction = format!(
-            "Create a standalone static application for this request: {prompt}{context}\nReturn ONLY JSON: {{\"files\":[{{\"path\":\"index.html\",\"content\":\"...\"}},{{\"path\":\"styles.css\",\"content\":\"...\"}},{{\"path\":\"app.js\",\"content\":\"...\"}}]}}. No external dependencies or network calls. Only index.html, styles.css, app.js, logic.mjs and README.md paths are supported."
-        );
         let output = self
             .providers
-            .complete(
-                &connection,
-                &[Message {
-                    role: "user".into(),
-                    content: instruction,
-                }],
-            )
+            .complete_json(&connection, std::slice::from_ref(&request))
             .await?;
-        let files = parse_generated_files(&output)?;
-        validate_files(&files)?;
+        let (files, repaired) = match usable_files(&output) {
+            Ok(files) => (files, false),
+            Err(error) => {
+                // One repair request: show the model its reply and the reason
+                // it was rejected. The reply is bounded to stay within limits.
+                let conversation = [
+                    request,
+                    Message {
+                        role: "assistant".into(),
+                        content: bounded_text(&output, 100_000).into(),
+                    },
+                    Message {
+                        role: "user".into(),
+                        content: prompts::repair(&error.to_string()),
+                    },
+                ];
+                let output = self
+                    .providers
+                    .complete_json(&connection, &conversation)
+                    .await?;
+                let files = usable_files(&output).map_err(|error| {
+                    anyhow::anyhow!(
+                        "Provider did not return a usable project after one repair attempt: {error}"
+                    )
+                })?;
+                (files, true)
+            }
+        };
         let project = Project {
             id: uuid::Uuid::new_v4(),
             prompt,
             files,
             verification: "Source generated; behavior and security have not been verified".into(),
+            build: Some(BuildInfo {
+                provider: connection.provider.clone(),
+                model: connection.model.clone(),
+                prompt_version: prompts::PROMPT_VERSION.into(),
+                plan: context.into(),
+                created_unix: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|elapsed| elapsed.as_secs())
+                    .unwrap_or_default(),
+                duration_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+                repaired,
+            }),
         };
         self.store.save(&project).await?;
         Ok(project)
     }
+}
+
+/// Parses and validates a provider reply as a project file bundle.
+fn usable_files(output: &str) -> Result<Vec<SourceFile>> {
+    let files = parse_generated_files(output)?;
+    validate_files(&files)?;
+    Ok(files)
 }
 
 /// Accepts bare JSON, JSON inside a Markdown code fence, or JSON surrounded by
